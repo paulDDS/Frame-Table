@@ -4,12 +4,16 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#include "threads/palloc.h"
+#include "userprog/pagedir.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
 
 static void kill (struct intr_frame *);
 static void page_fault (struct intr_frame *);
+static bool install_page (void *upage, void *kpage, bool writable);
 
 /* Registers handlers for interrupts that can be caused by user
    programs.
@@ -89,6 +93,9 @@ kill (struct intr_frame *f)
       printf ("%s: dying due to interrupt %#04x (%s).\n",
               thread_name (), f->vec_no, intr_name (f->vec_no));
       intr_dump_frame (f);
+      
+      printf ("%s: exit(-1)\n", thread_current()->name);
+      thread_current()->exit_code = -1;
       thread_exit (); 
 
     case SEL_KCSEG:
@@ -148,14 +155,57 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+  void *upage = pg_round_down(fault_addr);
+
+  // apenas faults de página ausente
+   if (!not_present)
+      kill(f);
+
+   /* abaixo do espaço válido do usuário */
+   if (fault_addr < (void *) 0x08048000)
+      kill(f);
+
+    // kernel memory -> inválido
+    if (fault_addr >= PHYS_BASE)
+      kill(f);
+
+    // stack growth
+    if (fault_addr >= f->esp - 32)
+    {
+      uint8_t *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+
+      if (kpage == NULL)
+         kill(f);
+
+      if (!install_page(upage, kpage, true))
+      {
+         palloc_free_page(kpage);
+         kill(f);
+      }
+
+      return;
+    }
+
+    kill(f);
+
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
-  printf ("Page fault at %p: %s error %s page in %s context.\n",
-          fault_addr,
-          not_present ? "not present" : "rights violation",
-          write ? "writing" : "reading",
-          user ? "user" : "kernel");
-  kill (f);
+//   printf ("Page fault at %p: %s error %s page in %s context.\n",
+//           fault_addr,
+//           not_present ? "not present" : "rights violation",
+//           write ? "writing" : "reading",
+//           user ? "user" : "kernel");
+//   kill (f);
 }
 
+static bool
+install_page (void *upage, void *kpage, bool writable)
+{
+  struct thread *t = thread_current ();
+
+  /* Verify that there's not already a page at that virtual
+     address, then map our page there. */
+  return (pagedir_get_page (t->pagedir, upage) == NULL
+          && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
